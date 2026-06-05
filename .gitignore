@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Numba cache
+.numba_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Mypy
+.mypy_cache/
+
+# Pytest
+.pytest_cache/
+
+# Editor
+.vscode/
+.idea/

@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nbmdsa"
+version = "0.1.0"
+description = "Numba miscellaneous data structures and algorithms"
+authors = [
+    {name = "Boris Gailleton", email = "boris.gailleton@gmail.com"},
+]
+readme = "README.md"
+license = {text = "PLACEHOLDER"}
+requires-python = ">=3.10"
+dependencies = [
+    "numba",
+    "numpy",
+]
+
+[project.urls]
+Homepage = "bgailleton.github.io"
+Repository = "bgailleton.github.io"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nbmdsa"]
+artifacts = ["src/nbmdsa/py.typed"]
+
+[tool.pylint.main]
+source-roots = ["src"]
+
+[tool.pylint.format]
+max-line-length = 88
+
+[tool.pylint."messages control"]
+disable = []
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
