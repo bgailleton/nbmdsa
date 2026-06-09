@@ -27,3 +27,10 @@ env/
 # Editor
 .vscode/
 .idea/
+
+# Archive
+_archive/
+
+# LLM
+CLAUDE.md
+*.claude.md
