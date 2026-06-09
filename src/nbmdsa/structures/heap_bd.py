@@ -1,25 +1,36 @@
-"""Static (fixed-capacity) priority queues backed by a binary heap.
+"""Bounded priority queues — keep the K best elements.
 
-Provides MinHeapSt and MaxHeapSt variants, each in five score dtypes:
-float32, float64, int32, int64, uint8.  All types are usable inside @njit.
+MinHeapBd keeps the K *smallest* scores; MaxHeapBd keeps the K *largest*.
+When full, emplace() evicts the current worst element only if the new score
+is strictly better, otherwise returns False (no insertion).
+
+Internal structure is the *opposite* of the name — MinHeapBd is backed by
+a max-heap so the worst kept element (the largest) sits at the root for O(1)
+eviction; MaxHeapBd is backed by a min-heap for the same reason.
+
+As a consequence, top()/top_score()/top_idx() return the *worst* of the
+currently kept elements (useful as a rejection threshold).
+
+drain_sorted() fills the output arrays backward so the result is always
+ascending for Min* and descending for Max*, consistent with the other variants.
 
 Public factories:
-    make_min_heap_st(max_size, dtype)
-    make_max_heap_st(max_size, dtype)
-    make_min_heap_st_from(indices, scores)   # heapifies in O(n)
-    make_max_heap_st_from(indices, scores)
+    make_min_heap_bd(max_size, dtype)
+    make_max_heap_bd(max_size, dtype)
+    make_min_heap_bd_from(indices, scores)
+    make_max_heap_bd_from(indices, scores)
 
-Methods (usable in @njit and on Python-side proxy):
-    heap.emplace(idx, score) -> bool   # False if full
-    heap.top()               -> (idx, score)
+Methods (same API as St/Dy):
+    heap.emplace(idx, score) -> bool   # False if full and score not better
+    heap.top()               -> (idx, score)   # worst kept element
     heap.top_score()         -> score
     heap.top_idx()           -> idx
-    heap.pop()
+    heap.pop()               # removes worst kept element
     heap.is_empty()          -> bool
     heap.reset()
-    heap.reserve(n)          # no-op on static (API compatibility)
-    heap.shrink_to_fit()     # no-op on static (API compatibility)
-    heap.drain_sorted(out_indices, out_scores)  # empties heap; ascending/descending
+    heap.reserve(n)          # no-op (API compatibility)
+    heap.shrink_to_fit()     # no-op (API compatibility)
+    heap.drain_sorted(out_indices, out_scores)
     heap.indices_view()      -> int64[:]
     heap.scores_view()       -> dtype[:]
 
@@ -37,12 +48,12 @@ from nbmdsa.structures._heap_common import _HeapProxyMixin
 # ── Type class registration ───────────────────────────────────────────────────
 
 @structref.register
-class MinHeapStType(types.StructRef):
+class MinHeapBdType(types.StructRef):
     def preprocess_fields(self, fields):
         return tuple((name, types.unliteral(t)) for name, t in fields)
 
 @structref.register
-class MaxHeapStType(types.StructRef):
+class MaxHeapBdType(types.StructRef):
     def preprocess_fields(self, fields):
         return tuple((name, types.unliteral(t)) for name, t in fields)
 
@@ -56,35 +67,23 @@ def _fields(score_nb_type):
         ('max_size', types.int64),
     ]
 
-MinHeapStF32 = MinHeapStType(_fields(types.float32))
-MinHeapStF64 = MinHeapStType(_fields(types.float64))
-MinHeapStI32 = MinHeapStType(_fields(types.int32))
-MinHeapStI64 = MinHeapStType(_fields(types.int64))
-MinHeapStU8  = MinHeapStType(_fields(types.uint8))
+MinHeapBdF32 = MinHeapBdType(_fields(types.float32))
+MinHeapBdF64 = MinHeapBdType(_fields(types.float64))
+MinHeapBdI32 = MinHeapBdType(_fields(types.int32))
+MinHeapBdI64 = MinHeapBdType(_fields(types.int64))
+MinHeapBdU8  = MinHeapBdType(_fields(types.uint8))
 
-MaxHeapStF32 = MaxHeapStType(_fields(types.float32))
-MaxHeapStF64 = MaxHeapStType(_fields(types.float64))
-MaxHeapStI32 = MaxHeapStType(_fields(types.int32))
-MaxHeapStI64 = MaxHeapStType(_fields(types.int64))
-MaxHeapStU8  = MaxHeapStType(_fields(types.uint8))
+MaxHeapBdF32 = MaxHeapBdType(_fields(types.float32))
+MaxHeapBdF64 = MaxHeapBdType(_fields(types.float64))
+MaxHeapBdI32 = MaxHeapBdType(_fields(types.int32))
+MaxHeapBdI64 = MaxHeapBdType(_fields(types.int64))
+MaxHeapBdU8  = MaxHeapBdType(_fields(types.uint8))
 
-# ── Sift operations (comparison differs between min and max) ──────────────────
+# ── Sift operations ───────────────────────────────────────────────────────────
+# MinHeapBd is backed by a max-heap; MaxHeapBd by a min-heap.
 
-@overload_method(MinHeapStType, '_sift_up')
-def _ol_min_sift_up(self, i):
-    def impl(self, i):
-        while i > 0:
-            p = (i - 1) >> 1
-            if self.scores[p] > self.scores[i]:
-                self.indices[p], self.indices[i] = self.indices[i], self.indices[p]
-                self.scores[p],  self.scores[i]  = self.scores[i],  self.scores[p]
-                i = p
-            else:
-                break
-    return impl
-
-@overload_method(MaxHeapStType, '_sift_up')
-def _ol_max_sift_up(self, i):
+@overload_method(MinHeapBdType, '_sift_up')
+def _ol_min_bd_sift_up(self, i):
     def impl(self, i):
         while i > 0:
             p = (i - 1) >> 1
@@ -96,26 +95,21 @@ def _ol_max_sift_up(self, i):
                 break
     return impl
 
-@overload_method(MinHeapStType, '_sift_down')
-def _ol_min_sift_down(self, i):
+@overload_method(MaxHeapBdType, '_sift_up')
+def _ol_max_bd_sift_up(self, i):
     def impl(self, i):
-        while True:
-            best = i
-            left = 2 * i + 1
-            right = left + 1
-            if left < self.size and self.scores[left] < self.scores[best]:
-                best = left
-            if right < self.size and self.scores[right] < self.scores[best]:
-                best = right
-            if best == i:
+        while i > 0:
+            p = (i - 1) >> 1
+            if self.scores[p] > self.scores[i]:
+                self.indices[p], self.indices[i] = self.indices[i], self.indices[p]
+                self.scores[p],  self.scores[i]  = self.scores[i],  self.scores[p]
+                i = p
+            else:
                 break
-            self.indices[i], self.indices[best] = self.indices[best], self.indices[i]
-            self.scores[i],  self.scores[best]  = self.scores[best],  self.scores[i]
-            i = best
     return impl
 
-@overload_method(MaxHeapStType, '_sift_down')
-def _ol_max_sift_down(self, i):
+@overload_method(MinHeapBdType, '_sift_down')
+def _ol_min_bd_sift_down(self, i):
     def impl(self, i):
         while True:
             best = i
@@ -132,19 +126,63 @@ def _ol_max_sift_down(self, i):
             i = best
     return impl
 
-# ── Shared methods ────────────────────────────────────────────────────────────
-
-def _ol_emplace(self, idx, score):
-    def impl(self, idx, score):
-        if self.size >= self.max_size:
-            return False
-        pos = self.size
-        self.indices[pos] = idx
-        self.scores[pos] = score
-        self.size += 1
-        self._sift_up(pos)
-        return True
+@overload_method(MaxHeapBdType, '_sift_down')
+def _ol_max_bd_sift_down(self, i):
+    def impl(self, i):
+        while True:
+            best = i
+            left = 2 * i + 1
+            right = left + 1
+            if left < self.size and self.scores[left] < self.scores[best]:
+                best = left
+            if right < self.size and self.scores[right] < self.scores[best]:
+                best = right
+            if best == i:
+                break
+            self.indices[i], self.indices[best] = self.indices[best], self.indices[i]
+            self.scores[i],  self.scores[best]  = self.scores[best],  self.scores[i]
+            i = best
     return impl
+
+# ── Type-specific emplace (eviction condition differs) ────────────────────────
+
+@overload_method(MinHeapBdType, 'emplace')
+def _ol_min_bd_emplace(self, idx, score):
+    def impl(self, idx, score):
+        if self.size < self.max_size:
+            pos = self.size
+            self.indices[pos] = idx
+            self.scores[pos]  = score
+            self.size += 1
+            self._sift_up(pos)
+            return True
+        if score < self.scores[0]:
+            self.indices[0] = idx
+            self.scores[0]  = score
+            self._sift_down(0)
+            return True
+        return False
+    return impl
+
+@overload_method(MaxHeapBdType, 'emplace')
+def _ol_max_bd_emplace(self, idx, score):
+    def impl(self, idx, score):
+        if self.size < self.max_size:
+            pos = self.size
+            self.indices[pos] = idx
+            self.scores[pos]  = score
+            self.size += 1
+            self._sift_up(pos)
+            return True
+        if score > self.scores[0]:
+            self.indices[0] = idx
+            self.scores[0]  = score
+            self._sift_down(0)
+            return True
+        return False
+    return impl
+
+# ── Shared methods ────────────────────────────────────────────────────────────
 
 def _ol_top(self):
     def impl(self):
@@ -192,13 +230,14 @@ def _ol_shrink_noop(self):
     return impl
 
 def _ol_drain_sorted(self, out_indices, out_scores):
-    # pop order matches desired output order for both min (asc) and max (desc)
+    # internal heap is reversed relative to name, so pop order is also reversed;
+    # fill backward to produce ascending (Min*) or descending (Max*) output
     def impl(self, out_indices, out_scores):
-        i = nb.int64(0)
+        i = self.size - nb.int64(1)
         while not self.is_empty():
             out_indices[i], out_scores[i] = self.top()
             self.pop()
-            i += 1
+            i -= 1
     return impl
 
 def _ol_indices_view(self):
@@ -211,8 +250,7 @@ def _ol_scores_view(self):
         return self.scores[:self.size]
     return impl
 
-for _T in (MinHeapStType, MaxHeapStType):
-    overload_method(_T, 'emplace')(_ol_emplace)
+for _T in (MinHeapBdType, MaxHeapBdType):
     overload_method(_T, 'top')(_ol_top)
     overload_method(_T, 'top_score')(_ol_top_score)
     overload_method(_T, 'top_idx')(_ol_top_idx)
@@ -227,16 +265,16 @@ for _T in (MinHeapStType, MaxHeapStType):
 
 # ── Proxy classes and boxing ──────────────────────────────────────────────────
 
-class MinHeapSt(_HeapProxyMixin, structref.StructRefProxy):
+class MinHeapBd(_HeapProxyMixin, structref.StructRefProxy):
     def __new__(cls, *args):
         return structref.StructRefProxy.__new__(cls, *args)
 
-class MaxHeapSt(_HeapProxyMixin, structref.StructRefProxy):
+class MaxHeapBd(_HeapProxyMixin, structref.StructRefProxy):
     def __new__(cls, *args):
         return structref.StructRefProxy.__new__(cls, *args)
 
-structref.define_boxing(MinHeapStType, MinHeapSt)
-structref.define_boxing(MaxHeapStType, MaxHeapSt)
+structref.define_boxing(MinHeapBdType, MinHeapBd)
+structref.define_boxing(MaxHeapBdType, MaxHeapBd)
 
 # ── Constructor factories ─────────────────────────────────────────────────────
 
@@ -266,11 +304,11 @@ def _make_from_ctor(nb_heap_type):
     return _ctor
 
 _SCORE_CONFIG = [
-    (np.float32, MinHeapStF32, MaxHeapStF32),
-    (np.float64, MinHeapStF64, MaxHeapStF64),
-    (np.int32,   MinHeapStI32, MaxHeapStI32),
-    (np.int64,   MinHeapStI64, MaxHeapStI64),
-    (np.uint8,   MinHeapStU8,  MaxHeapStU8),
+    (np.float32, MinHeapBdF32, MaxHeapBdF32),
+    (np.float64, MinHeapBdF64, MaxHeapBdF64),
+    (np.int32,   MinHeapBdI32, MaxHeapBdI32),
+    (np.int64,   MinHeapBdI64, MaxHeapBdI64),
+    (np.uint8,   MinHeapBdU8,  MaxHeapBdU8),
 ]
 
 _min_empty_ctors: dict = {}
@@ -287,18 +325,18 @@ for _np_dtype, _min_nb, _max_nb in _SCORE_CONFIG:
 
 # ── Public Python-side factories ──────────────────────────────────────────────
 
-def make_min_heap_st(max_size: int, dtype=np.float64):
-    """Return an empty MinHeapSt with given capacity and score dtype."""
+def make_min_heap_bd(max_size: int, dtype=np.float64):
+    """Return an empty MinHeapBd keeping the K smallest scores."""
     return _min_empty_ctors[np.dtype(dtype)](max_size)
 
-def make_max_heap_st(max_size: int, dtype=np.float64):
-    """Return an empty MaxHeapSt with given capacity and score dtype."""
+def make_max_heap_bd(max_size: int, dtype=np.float64):
+    """Return an empty MaxHeapBd keeping the K largest scores."""
     return _max_empty_ctors[np.dtype(dtype)](max_size)
 
-def make_min_heap_st_from(indices: np.ndarray, scores: np.ndarray):
-    """Build a MinHeapSt from existing arrays (heapifies in O(n))."""
+def make_min_heap_bd_from(indices: np.ndarray, scores: np.ndarray):
+    """Build a MinHeapBd from existing arrays (heapifies in O(n))."""
     return _min_from_ctors[np.dtype(scores.dtype)](indices, scores)
 
-def make_max_heap_st_from(indices: np.ndarray, scores: np.ndarray):
-    """Build a MaxHeapSt from existing arrays (heapifies in O(n))."""
+def make_max_heap_bd_from(indices: np.ndarray, scores: np.ndarray):
+    """Build a MaxHeapBd from existing arrays (heapifies in O(n))."""
     return _max_from_ctors[np.dtype(scores.dtype)](indices, scores)
