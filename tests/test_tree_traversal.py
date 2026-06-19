@@ -88,7 +88,7 @@ def test_full_drainage_area_chain():
     tree  = make_tree(z, nb_fn, mask, mode='par')
     order = topo_order(tree)
     area  = np.ones(3, dtype=np.float64)
-    tree_traversal_full(order, tree, _accum, (area,), upstream=True)
+    tree_traversal_full(order, tree, _accum, (area,), direction='up')
     assert area[2] == 3.0
 
 def test_full_reverse_visits_all_valid():
@@ -96,7 +96,7 @@ def test_full_reverse_visits_all_valid():
     tree  = make_tree(z, nb_fn, mask, mode='par')
     order = topo_order(tree)
     counter = np.zeros(1, np.int64)
-    tree_traversal_full(order, tree, _count, (counter,), upstream=False)
+    tree_traversal_full(order, tree, _count, (counter,), direction='down')
     assert counter[0] == np.count_nonzero(mask)
 
 
@@ -108,7 +108,7 @@ def test_partial_bfs_upstream_from_root():
     tree    = make_tree(z, nb_fn, mask, mode='par')
     visited = np.zeros(9, np.int64)
     start   = np.array([0], np.int64)
-    tree_traversal_partial(start, tree, _visit, (visited,), upstream=True, mode='bfs')
+    tree_traversal_partial(start, tree, _visit, (visited,), direction='up', mode='bfs')
     assert visited[0] == 1
     assert visited[4] == 1
     assert visited.sum() == 2
@@ -119,7 +119,7 @@ def test_partial_bfs_downstream_from_leaf():
     tree    = make_tree(z, nb_fn, mask, mode='par')
     visited = np.zeros(9, np.int64)
     start   = np.array([4], np.int64)
-    tree_traversal_partial(start, tree, _visit, (visited,), upstream=False, mode='bfs')
+    tree_traversal_partial(start, tree, _visit, (visited,), direction='down', mode='bfs')
     assert visited[4] == 1
     assert visited[0] == 1
     assert visited.sum() == 2
@@ -129,7 +129,7 @@ def test_partial_bfs_upstream_full_mode():
     tree    = make_tree(z, nb_fn, mask, mode='full')
     visited = np.zeros(9, np.int64)
     start   = np.array([0], np.int64)
-    tree_traversal_partial(start, tree, _visit, (visited,), upstream=True, mode='bfs')
+    tree_traversal_partial(start, tree, _visit, (visited,), direction='up', mode='bfs')
     assert visited[0] == 1 and visited[4] == 1 and visited.sum() == 2
 
 
@@ -141,8 +141,8 @@ def test_partial_dfs_upstream_same_nodes_as_bfs():
     start = np.array([0], np.int64)
     vis_bfs = np.zeros(9, np.int64)
     vis_dfs = np.zeros(9, np.int64)
-    tree_traversal_partial(start, tree, _visit, (vis_bfs,), upstream=True, mode='bfs')
-    tree_traversal_partial(start, tree, _visit, (vis_dfs,), upstream=True, mode='dfs')
+    tree_traversal_partial(start, tree, _visit, (vis_bfs,), direction='up', mode='bfs')
+    tree_traversal_partial(start, tree, _visit, (vis_dfs,), direction='up', mode='dfs')
     assert np.array_equal(vis_bfs, vis_dfs)
 
 
@@ -154,8 +154,8 @@ def test_partial_pq_upstream_same_nodes():
     start = np.array([0], np.int64)
     vis_bfs = np.zeros(9, np.int64)
     vis_pq  = np.zeros(9, np.int64)
-    tree_traversal_partial(start, tree, _visit, (vis_bfs,), upstream=True, mode='bfs')
-    tree_traversal_partial(start, tree, _visit, (vis_pq,),  upstream=True,
+    tree_traversal_partial(start, tree, _visit, (vis_bfs,), direction='up', mode='bfs')
+    tree_traversal_partial(start, tree, _visit, (vis_pq,),  direction='up',
                            mode='pq', z=z, min_heap=False)
     assert np.array_equal(vis_bfs, vis_pq)
 
@@ -166,7 +166,37 @@ def test_partial_pq_requires_z():
     start = np.array([0], np.int64)
     vis   = np.zeros(9, np.int64)
     with pytest.raises(ValueError):
-        tree_traversal_partial(start, tree, _visit, (vis,), mode='pq')
+        tree_traversal_partial(start, tree, _visit, (vis,), direction='up', mode='pq')
+
+
+# ── direction='none' ─────────────────────────────────────────────────────────
+
+def test_full_none_visits_all_valid():
+    """direction='none' on full traversal: linear scan, same count as 'up'."""
+    z, mask, nb_fn = _grid()
+    tree  = make_tree(z, nb_fn, mask, mode='par')
+    order = topo_order(tree)
+    counter = np.zeros(1, np.int64)
+    tree_traversal_full(order, tree, _count, (counter,), direction='none')
+    assert counter[0] == np.count_nonzero(mask)
+
+def test_partial_none_visits_all_valid():
+    """direction='none' partial from interior node: expands to all valid neighbours."""
+    z, mask, nb_fn = _chain()
+    tree    = make_tree(z, nb_fn, mask, mode='par')
+    start   = np.array([1], np.int64)
+    visited = np.zeros(3, np.int64)
+    tree_traversal_partial(start, tree, _visit, (visited,), direction='none', mode='bfs')
+    assert visited.sum() == 3
+
+def test_partial_none_reaches_upstream_from_outlet():
+    """direction='none' from outlet (cell 2) reaches all cells including higher ones."""
+    z, mask, nb_fn = _chain()
+    tree    = make_tree(z, nb_fn, mask, mode='par')
+    start   = np.array([2], np.int64)   # outlet / root
+    visited = np.zeros(3, np.int64)
+    tree_traversal_partial(start, tree, _visit, (visited,), direction='none', mode='bfs')
+    assert visited[0] == 1   # leaf, upstream of start — reached despite no up filter
 
 
 # ── tree_traversal_partial_implicit ──────────────────────────────────────────
@@ -177,7 +207,7 @@ def test_partial_implicit_bfs_upstream_from_root():
     visited = np.zeros(9, np.int64)
     start   = np.array([0], np.int64)
     tree_traversal_partial_implicit(start, tree, z, _visit_implicit, (visited,),
-                                    upstream=True, mode='bfs')
+                                    direction='up', mode='bfs')
     assert visited[0] == 1 and visited[4] == 1 and visited.sum() == 2
 
 def test_partial_implicit_bfs_downstream_from_leaf():
@@ -186,7 +216,7 @@ def test_partial_implicit_bfs_downstream_from_leaf():
     visited = np.zeros(9, np.int64)
     start   = np.array([4], np.int64)
     tree_traversal_partial_implicit(start, tree, z, _visit_implicit, (visited,),
-                                    upstream=False, mode='bfs')
+                                    direction='down', mode='bfs')
     assert visited[4] == 1 and visited[0] == 1 and visited.sum() == 2
 
 def test_partial_implicit_drainage_area_chain():
@@ -218,5 +248,5 @@ def test_partial_implicit_drainage_area_chain():
     visited = np.zeros(3, np.int64)
     tree_traversal_partial_implicit(np.array([0, 1, 2], np.int64), tree, z,
                                     _visit_implicit, (visited,),
-                                    upstream=True, mode='bfs')
+                                    direction='up', mode='bfs')
     assert visited.sum() == 3

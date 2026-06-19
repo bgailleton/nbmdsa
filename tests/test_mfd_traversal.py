@@ -104,7 +104,7 @@ def test_full_reverse_visits_all_valid():
     z, mask, nb_fn = _grid()
     order   = mfd_topo_order(z, mask, nb_fn)
     counter = np.zeros(1, np.int64)
-    mfd_traversal_full(order, z, mask, nb_fn, _count, (counter,), upstream=False)
+    mfd_traversal_full(order, z, mask, nb_fn, _count, (counter,), direction='down')
     assert counter[0] == int(np.count_nonzero(mask))
 
 def test_full_drainage_area_chain():
@@ -113,7 +113,7 @@ def test_full_drainage_area_chain():
     order  = mfd_topo_order(z, mask, nb_fn)
     area   = np.ones(3, dtype=np.float64)
     nbuf   = np.empty(8, np.int64)
-    mfd_traversal_full(order, z, mask, nb_fn, _accum, (area, nbuf), upstream=True)
+    mfd_traversal_full(order, z, mask, nb_fn, _accum, (area, nbuf), direction='up')
     assert area[2] == 3.0
 
 
@@ -125,7 +125,7 @@ def test_partial_bfs_downstream_chain():
     visited = np.zeros(3, np.int64)
     start   = np.array([0], np.int64)
     mfd_traversal_partial(start, z, mask, nb_fn, _visit, (visited,),
-                           upstream=False, mode='bfs')
+                           direction='down', mode='bfs')
     assert visited.sum() == 3
 
 def test_partial_bfs_upstream_chain():
@@ -134,7 +134,7 @@ def test_partial_bfs_upstream_chain():
     visited = np.zeros(3, np.int64)
     start   = np.array([2], np.int64)
     mfd_traversal_partial(start, z, mask, nb_fn, _visit, (visited,),
-                           upstream=True, mode='bfs')
+                           direction='up', mode='bfs')
     assert visited.sum() == 3
 
 def test_partial_bfs_upstream_excludes_lower():
@@ -143,7 +143,7 @@ def test_partial_bfs_upstream_excludes_lower():
     visited = np.zeros(3, np.int64)
     start   = np.array([1], np.int64)
     mfd_traversal_partial(start, z, mask, nb_fn, _visit, (visited,),
-                           upstream=True, mode='bfs')
+                           direction='up', mode='bfs')
     assert visited[0] == 1    # higher neighbour
     assert visited[1] == 1    # start
     assert visited[2] == 0    # lower — not upstream
@@ -157,9 +157,9 @@ def test_partial_dfs_same_nodes_as_bfs():
     vis_bfs = np.zeros(3, np.int64)
     vis_dfs = np.zeros(3, np.int64)
     mfd_traversal_partial(start, z, mask, nb_fn, _visit, (vis_bfs,),
-                           upstream=False, mode='bfs')
+                           direction='down', mode='bfs')
     mfd_traversal_partial(start, z, mask, nb_fn, _visit, (vis_dfs,),
-                           upstream=False, mode='dfs')
+                           direction='down', mode='dfs')
     assert np.array_equal(vis_bfs, vis_dfs)
 
 
@@ -171,10 +171,33 @@ def test_partial_pq_same_nodes_as_bfs():
     vis_bfs = np.zeros(3, np.int64)
     vis_pq  = np.zeros(3, np.int64)
     mfd_traversal_partial(start, z, mask, nb_fn, _visit, (vis_bfs,),
-                           upstream=True, mode='bfs')
+                           direction='up', mode='bfs')
     mfd_traversal_partial(start, z, mask, nb_fn, _visit, (vis_pq,),
-                           upstream=True, mode='pq', min_heap=False)
+                           direction='up', mode='pq', min_heap=False)
     assert np.array_equal(vis_bfs, vis_pq)
+
+def test_partial_pq_downstream_same_nodes_as_bfs():
+    """PQ direction='down' visits same set as BFS direction='down'."""
+    z, mask, nb_fn = _chain()
+    start   = np.array([0], np.int64)
+    vis_bfs = np.zeros(3, np.int64)
+    vis_pq  = np.zeros(3, np.int64)
+    mfd_traversal_partial(start, z, mask, nb_fn, _visit, (vis_bfs,),
+                           direction='down', mode='bfs')
+    mfd_traversal_partial(start, z, mask, nb_fn, _visit, (vis_pq,),
+                           direction='down', mode='pq', min_heap=True)
+    assert np.array_equal(vis_bfs, vis_pq)
+
+def test_partial_pq_downstream_excludes_higher():
+    """From cell 1 (z=1) going downstream: reaches cell 2 (z=0), not cell 0 (z=2)."""
+    z, mask, nb_fn = _chain()
+    start   = np.array([1], np.int64)
+    vis_pq  = np.zeros(3, np.int64)
+    mfd_traversal_partial(start, z, mask, nb_fn, _visit, (vis_pq,),
+                           direction='down', mode='pq', min_heap=True)
+    assert vis_pq[0] == 0   # higher — not a receiver
+    assert vis_pq[1] == 1   # start
+    assert vis_pq[2] == 1   # lower receiver
 
 def test_partial_pq_invalid_mode():
     import pytest
@@ -182,7 +205,36 @@ def test_partial_pq_invalid_mode():
     start = np.array([0], np.int64)
     vis   = np.zeros(3, np.int64)
     with pytest.raises(ValueError):
-        mfd_traversal_partial(start, z, mask, nb_fn, _visit, (vis,), mode='xyz')
+        mfd_traversal_partial(start, z, mask, nb_fn, _visit, (vis,), direction='xyz')
+
+
+# ── direction='none' ─────────────────────────────────────────────────────────
+
+def test_full_none_visits_all_valid():
+    """direction='none' on full traversal: linear scan, same count as 'up'."""
+    z, mask, nb_fn = _grid()
+    order   = mfd_topo_order(z, mask, nb_fn)
+    counter = np.zeros(1, np.int64)
+    mfd_traversal_full(order, z, mask, nb_fn, _count, (counter,), direction='none')
+    assert counter[0] == int(np.count_nonzero(mask))
+
+def test_partial_none_visits_all_neighbours():
+    """direction='none' partial from cell 1 (middle of chain): reaches both neighbours."""
+    z, mask, nb_fn = _chain()
+    start   = np.array([1], np.int64)
+    visited = np.zeros(3, np.int64)
+    mfd_traversal_partial(start, z, mask, nb_fn, _visit, (visited,),
+                           direction='none', mode='bfs')
+    assert visited.sum() == 3   # all cells reachable with no directional filter
+
+def test_partial_none_ignores_z_ordering():
+    """direction='none' from lowest cell still reaches higher neighbours."""
+    z, mask, nb_fn = _chain()
+    start   = np.array([2], np.int64)   # z=0, the lowest
+    visited = np.zeros(3, np.int64)
+    mfd_traversal_partial(start, z, mask, nb_fn, _visit, (visited,),
+                           direction='none', mode='bfs')
+    assert visited[0] == 1   # z=2, upstream — reached despite being higher
 
 
 # ── multi_enabled ─────────────────────────────────────────────────────────────
@@ -195,7 +247,7 @@ def test_multi_enabled_allows_revisit():
     # and also seeded directly; with multi_enabled it can be enqueued twice
     start = np.array([0, 1], np.int64)
     mfd_traversal_partial(start, z, mask, nb_fn, _count, (counter,),
-                           upstream=False, multi_enabled=True, mode='bfs')
+                           direction='down', multi_enabled=True, mode='bfs')
     assert counter[0] >= 3   # at minimum all cells, likely more due to revisits
 
 def test_multi_disabled_visits_each_once():
@@ -203,5 +255,5 @@ def test_multi_disabled_visits_each_once():
     counter = np.zeros(1, np.int64)
     start   = np.array([0, 1], np.int64)
     mfd_traversal_partial(start, z, mask, nb_fn, _count, (counter,),
-                           upstream=False, multi_enabled=False, mode='bfs')
+                           direction='down', multi_enabled=False, mode='bfs')
     assert counter[0] == 3
